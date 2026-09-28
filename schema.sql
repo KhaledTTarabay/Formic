@@ -44,3 +44,30 @@ CREATE TABLE similarity_matches (
     similarity_score    FLOAT NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+BEGIN;
+
+ALTER TABLE tickets ADD CONSTRAINT tickets_line_start_check
+  CHECK (line_start > 0);
+ALTER TABLE tickets ADD CONSTRAINT tickets_line_end_check
+  CHECK (line_end > 0);
+ALTER TABLE tickets ADD CONSTRAINT tickets_line_range_check
+  CHECK (line_end >= line_start);
+ALTER TABLE tickets ADD CONSTRAINT tickets_line_end_needs_start_check
+  CHECK (line_end IS NULL OR line_start IS NOT NULL);
+
+ALTER TABLE tickets ADD CONSTRAINT tickets_fixed_fields_check
+  CHECK (
+    status NOT IN ('fixed', 'verified')
+    OR (fixed_at IS NOT NULL
+        AND resolved_by_agent_id IS NOT NULL
+        AND fix_description IS NOT NULL)
+  );
+
+ALTER TABLE tickets ADD CONSTRAINT tickets_duplicate_check
+  CHECK ((status = 'duplicate') = (duplicate_of IS NOT NULL));
+
+ALTER TABLE tickets ADD CONSTRAINT tickets_not_self_duplicate_check
+  CHECK (duplicate_of <> id);
+
+COMMIT;
