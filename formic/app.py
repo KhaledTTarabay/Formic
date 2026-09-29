@@ -1,15 +1,20 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from formic import db
+from formic.mcp_server import mcp
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
-    yield
-    await db.disconnect()
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        await db.disconnect()
 
 
 app = FastAPI(title = "Formic", lifespan=lifespan)
+app.mount("/mcp", mcp.streamable_http_app())
 
 
 @app.get("/health")
