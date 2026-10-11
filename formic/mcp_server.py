@@ -10,6 +10,8 @@ CHECK_MESSAGES = {
     "tickets_line_end_check": "line_end must be a positive number",
     "tickets_line_range_check": "line_end must be greater than or equal to line_start",
     "tickets_line_end_needs_start_check": "line_end requires line_start",
+    "tickets_title_not_blank_check": "title must not be empty",
+    "tickets_description_not_blank_check": "description must not be empty",
 }
 
 @mcp.tool()
@@ -25,28 +27,228 @@ async def file_ticket(
     line_start:int | None = None,
     line_end:int | None = None,
     )-> dict:
-    """This is a function you call when you want to file a ticket"""
+    # Docstring written by an AI assistant (Claude).
+    """File a new bug ticket for a defect you found but are not fixing right now.
 
-    
+    Use this when you hit a bug, crash, failing test, broken build, performance
+    problem or security issue that should be tracked so you or another agent
+    can fix it later. To fix a ticket yourself, file it and then claim it.
+
+    Args:
+        agent_id: Your agent id. The agent must exist and be active.
+        title: Short one-line summary of the problem. Must not be blank.
+        description: What happened, how to reproduce it, and expected vs.
+            actual behaviour. Include error messages or stack traces if you
+            have them. Must not be blank.
+        urgency: How soon this needs fixing: "low", "normal" (default),
+            "high" or "critical".
+        bug_type: The kind of problem: "bug" (default), "crash",
+            "regression", "test_failure", "build_failure", "performance"
+            or "security".
+        repo: Repository where the bug lives, if known.
+        commit_hash: Commit where you saw the bug, if known.
+        file_path: Path to the file with the suspect code, relative to the
+            repo root.
+        line_start: First suspect line (1-based, must be positive).
+        line_end: Last suspect line. Requires line_start and must be
+            greater than or equal to it. Omit for a single line.
+
+    Returns:
+        {"ticket_id": int, "status": "open"}
+
+    Raises:
+        ValueError: If the agent doesn't exist or is inactive, or if a field
+            is invalid. The message says what to fix.
+    """
+
+    pool = db.get_pool()
+
     try:
-        ticket_id = await db.get_pool().fetchval(
-            """
-            INSERT INTO tickets (
-                filed_by_agent_id, title, description, urgency, bug_type, repo,
-                commit_hash, file_path, line_start, line_end
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id
-            """,
-            agent_id, title, description, urgency, bug_type, 
-            repo, commit_hash, file_path, line_start, line_end,
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
+                if is_active is None:
+                    raise ValueError(f"No agent with id {agent_id}")
+                if not is_active:
+                    raise ValueError(f"Agent with id {agent_id} is not active and cannot file tickets")
+                
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tickets (
+                        filed_by_agent_id, title, description, urgency, bug_type, repo,
+                        commit_hash, file_path, line_start, line_end
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    RETURNING id, status
+                    """,
+                    agent_id, title, description, urgency, bug_type, 
+                    repo, commit_hash, file_path, line_start, line_end,
+                )
 
-        )
+                await conn.execute(
+                    """
+                    INSERT INTO ticket_events (ticket_id, agent_id, event_type, content)
+                    VALUES ($1, $2, 'filed', $3)
+                    """,
+
+                    row["id"], agent_id, title,
+                )
+
     except asyncpg.ForeignKeyViolationError:
         raise ValueError(f"No agent with id {agent_id}")
     except asyncpg.CheckViolationError as e:
         raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid ticket data"))
 
     
-    return {"ticket_id": ticket_id,"status": "open"}   
+    return {"ticket_id": row["id"],"status": row["status"]}   
 
+
+@mcp.tool()
+async def claim_ticket(ticket_id:int, agent_id:int, note:str | None = None) -> dict:
+    # Docstring written by an AI assistant (Claude).
+    """Claim an open ticket so you can work on fixing it.
+
+    Claiming moves the ticket from "open" to "in_progress" and records you as
+    the agent working on it, so other agents know not to pick it up. Only
+    open tickets can be claimed. If another agent claimed it first, you get
+    an error and should pick a different ticket.
+
+    Args:
+        ticket_id: The id of the ticket to claim.
+        agent_id: Your agent id. The agent must exist and be active.
+        note: Optional short note on how you plan to fix it. It is saved in
+            the ticket's history.
+
+    Returns:
+        {"ticket_id": int, "status": "in_progress", "claimed_at": ISO 8601 timestamp}
+
+    Raises:
+        ValueError: If the agent doesn't exist or is inactive, the ticket
+            doesn't exist, or the ticket is not open (the message includes
+            its current status).
+    """
+    pool = db.get_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
+                if is_active is None:
+                    raise ValueError(f"No agent with id {agent_id}")
+                if not is_active:
+                    raise ValueError(f"Agent with id {agent_id} is not active and cannot claim tickets")
+                
+                row = await conn.fetchrow(
+                    """
+                    UPDATE tickets
+                    SET status = "in_progress", claimed_by_agent_id = $2, claimed_at = NOW()
+                    WHERE id = $1 AND status = 'open'
+                    RETURNING id, status, claimed_at
+                    """,
+                    ticket_id, agent_id
+                )
+
+                if row is None:
+                    status = await conn.fetchval("SELECT status FROM tickets WHERE id = $1", ticket_id)
+                    if status is None:
+                        raise ValueError(f"No ticket with id {ticket_id}")
+                    raise ValueError(f"Ticket {ticket_id} is {status} and cannot be claimed")
+
+                await conn.execute(
+                    """
+                    INSERT INTO ticket_events (ticket_id, agent_id, event_type, content)
+                    VALUES ($1, $2, 'claimed', $3)
+                    """,
+                    ticket_id, agent_id, note,
+                )
+    except asyncpg.ForeignKeyViolationError:
+        raise ValueError(f"No agent with id {agent_id}")
+
+    return {"ticket_id": row["id"],
+            "status": row["status"],
+            "claimed_at": row["claimed_at"].isoformat()}           
+
+
+@mcp.tool()
+async def resolve_ticket(
+    ticket_id:int, 
+    agent_id:int, 
+    fix_description:str,
+    outcome: Literal{"fixed", "wont_fix", "cannot_reproduce"} = "fixed",
+    ) -> dict:
+    # Docstring written by an AI assistant (Claude).
+    """Close a ticket you claimed: mark it fixed, won't fix, or can't reproduce.
+
+    Only the agent that claimed the ticket can resolve it, and only while it
+    is "in_progress". Call claim_ticket first if you haven't.
+
+    Args:
+        ticket_id: The id of the ticket to resolve.
+        agent_id: Your agent id. Must be the agent that claimed the ticket.
+        fix_description: For "fixed", what was wrong and what you changed
+            (files touched, commit hash). For "wont_fix" or
+            "cannot_reproduce", why. Must not be blank.
+        outcome: How the ticket ends: "fixed" (default), "wont_fix" or
+            "cannot_reproduce".
+
+    Returns:
+        {"ticket_id": int, "status": outcome, "resolved_by_agent_id": int,
+         "fixed_at": ISO 8601 timestamp}
+
+    Raises:
+        ValueError: If the agent doesn't exist or is inactive, the ticket
+            doesn't exist, is not in progress, or is claimed by another
+            agent, or if fix_description is blank.
+    """
+    pool = db.get_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
+                if is_active is None:
+                    raise ValueError(f"No agent with id {agent_id}")
+                if not is_active:
+                    raise ValueError(f"Agent with id {agent_id} is not active and cannot resolve tickets")
+                
+                row = await conn.fetchrow(
+                    """
+                    UPDATE tickets
+                    SET status = $4, resolved_by_agent_id = $2,
+                        fix_description = $3, fixed_at = NOW()
+                    WHERE id = $1 AND status = 'in_progress' AND claimed_by_agent_id = $2
+                    RETURNING id, status, resolved_by_agent_id, fixed_at
+                    """,
+                    ticket_id, agent_id, fix_description, outcome,
+                )
+
+                    if row is None:
+                    info = await conn.fetchrow(
+                        "SELECT status, claimed_by_agent_id FROM tickets WHERE id = $1", ticket_id
+                    )
+                    if info is None:
+                        raise ValueError(f"No ticket with id {ticket_id}")
+                    if info["status"] != "in_progress":
+                        raise ValueError(
+                            f"Ticket {ticket_id} is {info['status']}; only in_progress tickets can be resolved"
+                        )
+                    raise ValueError(
+                        f"Ticket {ticket_id} is claimed by agent {info['claimed_by_agent_id']}, not you"
+                    )
+
+                await conn.execute(
+                    """
+                    INSERT INTO ticket_events (ticket_id, agent_id, event_type, content)
+                    VALUES ($1, $2, 'resolved', $3)
+                    """,
+                    ticket_id, agent_id, f"{outcome}: {fix_description}",
+                )
+    except asyncpg.ForeignKeyViolationError:
+        raise ValueError(f"No agent with id {agent_id}")
+    except asyncpg.CheckViolationError as e:
+        raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid resolve data"))
+
+    return {
+        "ticket_id": row["id"],
+        "status": row["status"],
+        "resolved_by_agent_id": row["resolved_by_agent_id"],
+        "fixed_at": row["fixed_at"].isoformat(),
+    }
