@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Agent-native bug tracker — structured tool calls instead of a browser."
 authors = ["Khaled <khaledtarabay277@gmail.com>"]
 readme = "README.md"
-packages = [{ include = "formic", from = "src" }]
+packages = [{ include = "formic"}]
 
 [tool.poetry.dependencies]
 python = "^3.12"

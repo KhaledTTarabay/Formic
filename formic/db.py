@@ -1,5 +1,6 @@
 import os
 import asyncpg
+from pgvector.asyncpg import register_vector
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql:///formic?host=/var/run/postgresql")
 
@@ -7,7 +8,7 @@ _pool: asyncpg.Pool | None = None
 
 async def connect() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5,init=register_vector)
 
 
 async def disconnect() -> None:

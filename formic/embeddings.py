@@ -2,7 +2,7 @@ import os
 import asyncio
 from sentence_transformers import SentenceTransformer
 
-EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "all-MiniLM-l6-v2")
+EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 _model: SentenceTransformer | None = None
 

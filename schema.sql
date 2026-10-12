@@ -1,5 +1,7 @@
 BEGIN;
 
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE agents (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -48,6 +50,7 @@ CREATE TABLE similarity_matches (
     ticket_id           INTEGER NOT NULL REFERENCES tickets(id),
     matched_ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
     similarity_score    FLOAT NOT NULL,
+    outcome             TEXT NOT NULL DEFAULT 'pending',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -108,14 +111,24 @@ ALTER TABLE tickets ADD CONSTRAINT tickets_fix_description_not_blank_check
   CHECK (fix_description IS NULL OR length(trim(fix_description)) > 0);
 
 
-
 ALTER TABLE ticket_events ADD CONSTRAINT ticket_events_type_check
   CHECK (event_type IN ('filed', 'claimed', 'unclaimed', 'resolved', 'status_changed', 'comment', 'verified', 'reopened', 'marked_duplicate'));
+
+
+ALTER TABLE similarity_matches ADD CONSTRAINT similarity_matches_outcomes_check
+  CHECK (outcome IN ('pending', 'confirmed', 'rejected'));
+
+ALTER TABLE similarity_matches ADD CONSTRAINT similarity_matches_unique_pair
+  UNIQUE (ticket_id, matched_ticket_id);
+
+ALTER TABLE similarity_matches ADD CONSTRAINT similarity_matches_not_self_match_check
+  CHECK (ticket_id <> matched_ticket_id);
 
 
 
 CREATE INDEX tickets_status_idx ON tickets (status);
 CREATE INDEX tickets_claimed_by_idx ON tickets (claimed_by_agent_id);
 CREATE INDEX ticket_events_ticket_id_idx ON ticket_events (ticket_id);
+CREATE INDEX tickets_embedding_idx ON tickets USING hnsw (embedding vector_cosine_ops);
 
 COMMIT;

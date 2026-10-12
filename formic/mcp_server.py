@@ -1,5 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 from formic import db
+from formic import embeddings
 from typing import Literal
 import asyncpg
 
@@ -12,7 +13,11 @@ CHECK_MESSAGES = {
     "tickets_line_end_needs_start_check": "line_end requires line_start",
     "tickets_title_not_blank_check": "title must not be empty",
     "tickets_description_not_blank_check": "description must not be empty",
+    "tickets_fix_description_not_blank_check": "fix_description must not be empty",
 }
+
+DUPLICATE_THRESHOLD = 0.85
+
 
 @mcp.tool()
 async def file_ticket(
@@ -62,6 +67,7 @@ async def file_ticket(
     """
 
     pool = db.get_pool()
+    embedding = (await embeddings.embed([f"{title}\n{description}"]))[0]
 
     try:
         async with pool.acquire() as conn:
@@ -76,14 +82,38 @@ async def file_ticket(
                     """
                     INSERT INTO tickets (
                         filed_by_agent_id, title, description, urgency, bug_type, repo,
-                        commit_hash, file_path, line_start, line_end
+                        commit_hash, file_path, line_start, line_end, embedding
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     RETURNING id, status
                     """,
                     agent_id, title, description, urgency, bug_type, 
-                    repo, commit_hash, file_path, line_start, line_end,
+                    repo, commit_hash, file_path, line_start, line_end, embedding,
                 )
+
+                neighbours = await conn.fetch(
+                    """
+                    SELECT id, 1 - (embedding <=> $1) AS score
+                    FROM tickets
+                    WHERE id <> $2
+                    AND status IN ('open', 'in_progress')
+                    AND repo IS NOT DISTINCT FROM $3
+                    AND embedding IS NOT NULL
+                    ORDER BY embedding <=> $1
+                    LIMIT 5
+                    """,
+                    embedding, row["id"], repo,
+                )
+                matches = [n for n in neighbours if n["score"] >= DUPLICATE_THRESHOLD]
+
+                await conn.executemany(
+                    """
+                    INSERT INTO similarity_matches (ticket_id, matched_ticket_id, similarity_score)
+                    VALUES ($1, $2, $3)
+                    """,
+                    [(row["id"], m["id"], m["score"]) for m in matches]
+                )
+
 
                 await conn.execute(
                     """
@@ -99,8 +129,11 @@ async def file_ticket(
     except asyncpg.CheckViolationError as e:
         raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid ticket data"))
 
-    
-    return {"ticket_id": row["id"],"status": row["status"]}   
+    return {
+        "ticket_id": row["id"],
+        "status": row["status"],
+        "possible_duplicates": [{"ticket_id": m["id"], "score": round(m["score"], 3)} for m in matches],
+    }
 
 
 @mcp.tool()
@@ -140,7 +173,7 @@ async def claim_ticket(ticket_id:int, agent_id:int, note:str | None = None) -> d
                 row = await conn.fetchrow(
                     """
                     UPDATE tickets
-                    SET status = "in_progress", claimed_by_agent_id = $2, claimed_at = NOW()
+                    SET status = 'in_progress', claimed_by_agent_id = $2, claimed_at = NOW()
                     WHERE id = $1 AND status = 'open'
                     RETURNING id, status, claimed_at
                     """,
@@ -173,7 +206,7 @@ async def resolve_ticket(
     ticket_id:int, 
     agent_id:int, 
     fix_description:str,
-    outcome: Literal{"fixed", "wont_fix", "cannot_reproduce"} = "fixed",
+    outcome: Literal["fixed", "wont_fix", "cannot_reproduce"] = "fixed",
     ) -> dict:
     # Docstring written by an AI assistant (Claude).
     """Close a ticket you claimed: mark it fixed, won't fix, or can't reproduce.
@@ -220,7 +253,7 @@ async def resolve_ticket(
                     ticket_id, agent_id, fix_description, outcome,
                 )
 
-                    if row is None:
+                if row is None:
                     info = await conn.fetchrow(
                         "SELECT status, claimed_by_agent_id FROM tickets WHERE id = $1", ticket_id
                     )
