@@ -14,6 +14,7 @@ CHECK_MESSAGES = {
     "tickets_title_not_blank_check": "title must not be empty",
     "tickets_description_not_blank_check": "description must not be empty",
     "tickets_fix_description_not_blank_check": "fix_description must not be empty",
+    "tickets_not_self_duplicate_check": "a ticket cannot be a duplicate of itself",
 }
 
 DUPLICATE_THRESHOLD = 0.85
@@ -286,3 +287,97 @@ async def resolve_ticket(
         "fixed_at": row["fixed_at"].isoformat(),
     }
 
+
+@mcp.tool()
+async def mark_duplicate(
+    ticket_id: int,
+    duplicate_of: int,
+    agent_id: int,
+    note: str | None = None,
+    ) -> dict:
+    # Docstring written by an AI assistant (Claude).
+    """Close a ticket as a duplicate of another ticket that reports the same bug.
+
+    ticket_id is the copy that gets closed; duplicate_of is the original that
+    stays open. Use this when file_ticket returned possible_duplicates and you
+    agree they are the same bug, or when you spot a duplicate yourself. You
+    don't need to claim either ticket first.
+
+    If duplicate_of is itself a duplicate, the ticket is linked to that
+    ticket's original instead, so duplicates always point at the original.
+
+    Args:
+        ticket_id: The duplicate ticket to close. Must be "open" or
+            "in_progress".
+        duplicate_of: The original ticket it duplicates.
+        agent_id: Your agent id. The agent must exist and be active.
+        note: Optional short reason why they are the same bug. It is saved
+            in the ticket's history.
+
+    Returns:
+        {"ticket_id": int, "status": "duplicate", "duplicate_of": int}
+
+    Raises:
+        ValueError: If the agent doesn't exist or is inactive, either ticket
+            doesn't exist, the ticket is already closed, or both ids point at
+            the same ticket.
+    """
+    pool = db.get_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
+                if is_active is None:
+                    raise ValueError(f"No agent with id {agent_id}")
+                if not is_active:
+                    raise ValueError(f"Agent with id {agent_id} is not active and cannot mark duplicated tickets")
+
+                target = await conn.fetchrow("SELECT status, duplicate_of FROM tickets WHERE id = $1", duplicate_of)
+                if target is None:
+                    raise ValueError(f"No ticket with id {duplicate_of}")
+                if target["status"] == "duplicate":
+                    duplicate_of = target["duplicate_of"]
+
+                row = await conn.fetchrow(
+                    """
+                    UPDATE tickets
+                    SET status = 'duplicate', duplicate_of = $2
+                    WHERE id = $1 AND status IN ('open','in_progress')
+                    RETURNING id, status, duplicate_of
+                    """,
+                    ticket_id, duplicate_of,
+                )
+
+                if row is None:
+                    status = await conn.fetchval("SELECT status FROM tickets WHERE id = $1", ticket_id)
+                    if status is None:
+                        raise ValueError(f"No ticket with id {ticket_id}")
+                    raise ValueError(f"Ticket {ticket_id} is {status} and cannot be marked as a duplicate")
+
+                await conn.execute(
+                    """
+                    UPDATE similarity_matches
+                    SET outcome = 'confirmed'
+                    WHERE (ticket_id = $1 AND matched_ticket_id = $2)
+                       OR (ticket_id = $2 AND matched_ticket_id = $1)
+                    """,
+                    ticket_id, duplicate_of,
+                )
+
+                await conn.execute(
+                    """
+                    INSERT INTO ticket_events (ticket_id, agent_id, event_type, content)
+                    VALUES ($1, $2, 'marked_duplicate', $3)
+                    """,
+                    ticket_id, agent_id, note,
+                )
+    except asyncpg.ForeignKeyViolationError:
+        raise ValueError("Referenced agent or ticket no longer exists")
+    except asyncpg.CheckViolationError as e:
+        raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid duplicate data"))
+
+    return {
+        "ticket_id": row["id"],
+        "status": row["status"],
+        "duplicate_of": row["duplicate_of"],
+    }
