@@ -252,3 +252,4 @@ async def resolve_ticket(
         "resolved_by_agent_id": row["resolved_by_agent_id"],
         "fixed_at": row["fixed_at"].isoformat(),
     }
+
