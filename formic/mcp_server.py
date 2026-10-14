@@ -381,3 +381,45 @@ async def mark_duplicate(
         "status": row["status"],
         "duplicate_of": row["duplicate_of"],
     }
+
+@mcp.tool()
+async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, none: str | None = None) ->  dict:
+    pool = db.get_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
+                if is_active is None:
+                    raise ValueError(f"No agent with id {agent_id}")
+                if not is_active:
+                    raise ValueError(f"Agent with id {agent_id} is not active and cannot verify tickets")
+
+                if passed = False:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tickets
+                        SET status = 'open',
+                            claimed_by_agent_id = NULL, claimed_at = NULL,
+                            resolved_by_agent_id = NULL, fix_description = NULL, fixed_at = NULL
+                        WHERE id = $1 AND status = 'fixed' AND resolved_by_agent_id <> $2
+                        RETURNING id, status
+                    
+                        """,
+                        ticket_id, agent_id,
+                    )
+                if passed = True:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tickets
+                        SET status = 'verified', verified_by_agent_id = $2, verified_at = NOW()
+                        WHERE id = $1 AND status = 'fixed' AND resolved_by_agent_id <> $2
+                        RETURNING id, status
+                        """,
+                        ticket_id, agent_id,
+                    )
+
+                if row is None:
+                    info = await conn.fetchrow("SELECT status, resolved_by_agent_id FROM tickets WHERE id = $1", ticket_id)
+                if info is None:
+                    raise ValueError ("No ticket with id {ticket_id}")
+
