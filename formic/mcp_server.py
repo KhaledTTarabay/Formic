@@ -15,6 +15,7 @@ CHECK_MESSAGES = {
     "tickets_description_not_blank_check": "description must not be empty",
     "tickets_fix_description_not_blank_check": "fix_description must not be empty",
     "tickets_not_self_duplicate_check": "a ticket cannot be a duplicate of itself",
+    "tickets_verifier_not_resolver_check": "you cannot verify a ticket you resolved",
 }
 
 DUPLICATE_THRESHOLD = 0.85
@@ -383,8 +384,41 @@ async def mark_duplicate(
     }
 
 @mcp.tool()
-async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, none: str | None = None) ->  dict:
+async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, note: str | None = None) ->  dict:
+    # Docstring written by an AI assistant (Claude).
+    """Check another agent's fix and either confirm it or reopen the ticket.
+
+    Only tickets with status "fixed" can be verified, and you cannot verify a
+    ticket you resolved yourself; a different agent must check the fix.
+
+    If the fix works, pass passed=True and the ticket becomes "verified".
+    If it doesn't, pass passed=False with a note saying what is still broken;
+    the ticket goes back to "open" with its claim and fix cleared, so any
+    agent can claim it again. The previous fix stays in the ticket's history.
+
+    Args:
+        ticket_id: The id of the fixed ticket to check.
+        agent_id: Your agent id. Must be active and not the agent that
+            resolved the ticket.
+        passed: True if the bug is gone, False if it still happens.
+        note: What you checked and what you saw. Required when passed is
+            False.
+
+    Returns:
+        If passed: {"ticket_id": int, "status": "verified",
+                    "verified_at": ISO 8601 timestamp}
+        If not:    {"ticket_id": int, "status": "open"}
+
+    Raises:
+        ValueError: If the agent doesn't exist or is inactive, the ticket
+            doesn't exist or isn't "fixed", you resolved the ticket yourself,
+            or passed is False without a note.
+    """
     pool = db.get_pool()
+
+    if not passed and not (note and note.strip()):
+        raise ValueError("note is required when verification fails: say what is still broken")
+
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -394,7 +428,19 @@ async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, none: str |
                 if not is_active:
                     raise ValueError(f"Agent with id {agent_id} is not active and cannot verify tickets")
 
-                if passed = False:
+                
+                if passed:
+                    row = await conn.fetchrow(
+                        """
+                        UPDATE tickets
+                        SET status = 'verified', verified_by_agent_id = $2, verified_at = NOW()
+                        WHERE id = $1 AND status = 'fixed' AND resolved_by_agent_id <> $2
+                        RETURNING id, status, verified_at
+                        """,
+                        ticket_id, agent_id,
+                    )
+
+                else:
                     row = await conn.fetchrow(
                         """
                         UPDATE tickets
@@ -407,19 +453,31 @@ async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, none: str |
                         """,
                         ticket_id, agent_id,
                     )
-                if passed = True:
-                    row = await conn.fetchrow(
-                        """
-                        UPDATE tickets
-                        SET status = 'verified', verified_by_agent_id = $2, verified_at = NOW()
-                        WHERE id = $1 AND status = 'fixed' AND resolved_by_agent_id <> $2
-                        RETURNING id, status
-                        """,
-                        ticket_id, agent_id,
-                    )
 
-                if row is None:
+                if row is  None:
                     info = await conn.fetchrow("SELECT status, resolved_by_agent_id FROM tickets WHERE id = $1", ticket_id)
-                if info is None:
-                    raise ValueError ("No ticket with id {ticket_id}")
+                    if info is None:
+                        raise ValueError (f"No ticket with id {ticket_id}")
+                    if info["status"] != "fixed":
+                        raise ValueError (f"Ticket {ticket_id} is {info['status']}; only fixed tickets can be verified")
+                    raise ValueError (f"You resolved ticket {ticket_id}; another agent must verify it")
+                
+                await conn.execute(
+                    """
+                    INSERT INTO ticket_events (ticket_id, agent_id, event_type, content)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    ticket_id, agent_id, "verified" if passed else "reopened", note,
+                )
+    except asyncpg.ForeignKeyViolationError:
+        raise ValueError("Referenced agent or ticket no longer exists")
+    except asyncpg.CheckViolationError as e:
+        raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid verification data"))
+
+    result = {"ticket_id": row["id"], "status": row["status"]}
+    if passed:
+        result["verified_at"] = row["verified_at"].isoformat()
+    return result
+            
+
 
