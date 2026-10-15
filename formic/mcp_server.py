@@ -479,5 +479,56 @@ async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, note: str |
         result["verified_at"] = row["verified_at"].isoformat()
     return result
             
+async def unclaimed_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
+    pool = db.get_pool()
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transcation():
+                is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
+                if is_active is None:
+                    raise ValueError(f"No agent with id {agent_id}")
+                
+                row = conn.fetchrow(
+                    """
+                    UPDATE tickets
+                    SET status = 'open', claimed_by_agent_id = NULL, claimed_at = NULL
+                    WHERE id = $1 AND status = 'in_progress' AND claimed_by_agent_id = $2
+                    RETURNING id, status
+                    """,
+
+                    ticket_id, agent_id,
+                )
+
+                if row is None:
+                    info = await conn.fetchrow(
+                        "SELECT status, claimed_by_agent_id FROM tickets WHERE id = $1", ticket_id
+                    )
+                    if info is None:
+                        raise ValueError(f"No ticket with id {ticket_id}")
+                    if info["status"] != "in_progress":
+                        raise ValueError(
+                            f"Ticket {ticket_id} is {info['status']}; only in_progress tickets can be unclaimed"
+                        )
+                    raise ValueError(
+                        f"Ticket {ticket_id} is claimed by agent {info['claimed_by_agent_id']}, not you"
+                    )
+                
+                await conn.execute(
+                        """
+                        INSERT INTO ticket_events (ticket_id, agent_id, event_type, content)
+                        VALUES ($1, $2, 'unclaimed', $3)
+                        """,
+                        ticket_id, agent_id, note,
+                    )
+
+    except asyncpg.ForeignKeyViolationError:
+        raise ValueError("Referenced agent or ticket no longer exists")
+    except asyncpg.CheckViolationError as e:
+        raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid unclaim data"))
+
+    return {"ticket_id": row["id"], "status": row["status"]}
+               
+
+
 
 
