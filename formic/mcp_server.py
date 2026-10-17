@@ -383,6 +383,7 @@ async def mark_duplicate(
         "duplicate_of": row["duplicate_of"],
     }
 
+
 @mcp.tool()
 async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, note: str | None = None) ->  dict:
     # Docstring written by an AI assistant (Claude).
@@ -478,7 +479,9 @@ async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, note: str |
     if passed:
         result["verified_at"] = row["verified_at"].isoformat()
     return result
-            
+
+
+@mcp.tools          
 async def unclaimed_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
     pool = db.get_pool()
     try:
@@ -527,7 +530,21 @@ async def unclaimed_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
         raise ValueError(CHECK_MESSAGES.get(e.constraint_name, "Invalid unclaim data"))
 
     return {"ticket_id": row["id"], "status": row["status"]}
-               
+
+
+@mcp.tools()
+async def list_tickets(
+    status: Literal["open", "in_progress", "fixed", "wont_fix", "cannot_reproduce", 
+                    "duplicate", "verified"] | None = "open",
+    urgency: Literal["low","normal","high","critical"] | None = None,
+    bug_type: Literal["bug","crash","regression","test_failure",
+                     "build_failure", "performance", "security"] | None = None,
+    repo: str | None = None,
+    file_path: str | None = None,
+    claimed_by_agent_id: int | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:               
 
 
 
