@@ -481,17 +481,43 @@ async def verify_ticket(ticket_id: int, agent_id: int, passed: bool, note: str |
     return result
 
 
-@mcp.tools          
-async def unclaimed_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
+@mcp.tool()  
+async def unclaim_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
+    # Docstring written by an AI assistant (Claude).
+    """Give up a ticket you claimed so another agent can work on it.
+
+    Use this when you can't finish a fix: you're stuck, it's outside what you
+    can change, or you need to stop. The ticket goes back to "open" with no
+    claim. Only the agent that claimed the ticket can release it.
+
+    Args:
+        ticket_id: The id of the ticket to release. Must be "in_progress"
+            and claimed by you.
+        agent_id: Your agent id.
+        note: What you tried, what you found, and why you're stopping, so the
+            next agent doesn't start from zero. Must not be blank.
+
+    Returns:
+        {"ticket_id": int, "status": "open"}
+
+    Raises:
+        ValueError: If the agent doesn't exist, the ticket doesn't exist, is
+            not in progress, or is claimed by another agent, or if note is
+            blank.
+    """
     pool = db.get_pool()
+
+    if not note.strip():
+        raise ValueError("note is required: say what you tried and why you're releasing the ticket")
+
     try:
         async with pool.acquire() as conn:
-            async with conn.transcation():
+            async with conn.transaction():
                 is_active = await conn.fetchval("SELECT is_active FROM agents WHERE id = $1", agent_id)
                 if is_active is None:
                     raise ValueError(f"No agent with id {agent_id}")
                 
-                row = conn.fetchrow(
+                row = await conn.fetchrow(
                     """
                     UPDATE tickets
                     SET status = 'open', claimed_by_agent_id = NULL, claimed_at = NULL
@@ -532,7 +558,7 @@ async def unclaimed_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
     return {"ticket_id": row["id"], "status": row["status"]}
 
 
-@mcp.tools()
+@mcp.tool()
 async def list_tickets(
     status: Literal["open", "in_progress", "fixed", "wont_fix", "cannot_reproduce", 
                     "duplicate", "verified"] | None = "open",
@@ -544,7 +570,155 @@ async def list_tickets(
     claimed_by_agent_id: int | None = None,
     limit: int = 20,
     offset: int = 0,
-) -> dict:               
+) -> dict:
+    # Docstring written by an AI assistant (Claude).
+    """List tickets matching the given filters, most urgent first.
+
+    Use this to find work to pick up, to check for known bugs in the repo or
+    file you're working on before filing a new ticket, or to find tickets you
+    have claimed. Results are short summaries; call get_ticket for a ticket's
+    full description and history.
+
+    All filters are optional and combined with AND. Tickets are sorted by
+    urgency (critical, high, normal, low), then oldest first.
+
+    Args:
+        status: Only tickets with this status. Defaults to "open". Pass null
+            to list tickets of every status.
+        urgency: Only tickets with this urgency.
+        bug_type: Only tickets of this kind.
+        repo: Only tickets in this repository.
+        file_path: Only tickets pointing at this exact file path.
+        claimed_by_agent_id: Only tickets claimed by this agent. Pass your
+            own id to find tickets you're working on.
+        limit: Maximum number of tickets to return, 1 to 100. Default 20.
+        offset: Number of tickets to skip, for paging. Default 0.
+
+    Returns:
+        {"tickets": [{"id", "title", "status", "urgency", "bug_type", "repo",
+                      "file_path", "claimed_by_agent_id",
+                      "created_at"}, ...],
+         "count": number of tickets in this page}
+
+    Raises:
+        ValueError: If limit is below 1 or offset is negative.
+    """
+
+    conditions = []
+    params = []
+
+    def add(column, value):
+        params.append(value)
+        conditions.append(f"{column} = ${len(params)}")
+
+    if status is not None:
+        add("status", status)
+    if urgency is not None:
+        add("urgency", urgency)
+    if bug_type is not None:
+        add("bug_type", bug_type)
+    if repo is not None:
+        add("repo", repo)
+    if file_path is not None:
+        add("file_path", file_path)
+    if claimed_by_agent_id is not None:
+        add("claimed_by_agent_id", claimed_by_agent_id)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    params.append(min(limit, 100))
+    params.append(offset)
+
+    if limit < 1 or offset < 0:
+        raise ValueError("limit must be at least 1 and offset cannot be negative")
+
+
+    rows = await db.get_pool().fetch(
+        f"""
+        SELECT id, title, status, urgency, bug_type, repo, file_path,
+                claimed_by_agent_id, created_at
+        FROM tickets
+        {where}
+        ORDER BY array_position(ARRAY['critical','high','normal','low'], urgency), created_at
+        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+        """,
+        *params,
+    )
+
+    tickets = [
+        {**dict(r),"created_at": r["created_at"].isoformat()}
+        for r in rows
+    ]
+
+    return {"tickets": tickets, "count": len(tickets)}
+
+
+@mcp.tool()
+async def get_ticket(ticket_id: int) -> dict:
+    # Docstring written by an AI assistant (Claude).
+    """Get one ticket's full details and its complete history.
+
+    Use this before claiming a ticket, to read how to reproduce the bug and
+    where it is; when picking up a reopened or released ticket, to read why
+    the last fix failed or what the previous agent tried; when verifying, to
+    read what the fix changed; and before mark_duplicate, to compare two
+    tickets' descriptions instead of trusting the similarity score alone.
+
+    Args:
+        ticket_id: The id of the ticket.
+
+    Returns:
+        {"ticket": {"id", "title", "description", "status", "urgency",
+                    "bug_type", "filed_by_agent_id", "claimed_by_agent_id",
+                    "claimed_at", "resolved_by_agent_id", "fix_description",
+                    "fixed_at", "verified_by_agent_id", "verified_at",
+                    "duplicate_of", "repo", "commit_hash", "file_path",
+                    "line_start", "line_end", "created_at"},
+         "events": [{"event_type", "agent_id", "content", "created_at"}, ...]}
+
+        Timestamps are ISO 8601 strings; fields that haven't happened yet
+        (e.g. fixed_at on an open ticket) are null. Events are oldest first:
+        filed, claimed, unclaimed, resolved, reopened, verified,
+        marked_duplicate. Their content holds the notes and fix descriptions.
+
+    Raises:
+        ValueError: If the ticket doesn't exist.
+    """
+    pool = db.get_pool()
+
+    ticket = await pool.fetchrow(
+        """
+        SELECT id, title, description, status, urgency, bug_type,
+               filed_by_agent_id, claimed_by_agent_id, claimed_at,
+               resolved_by_agent_id, fix_description, fixed_at,
+               verified_by_agent_id, verified_at, duplicate_of,
+               repo, commit_hash, file_path, line_start, line_end, created_at
+        FROM tickets WHERE id = $1
+        """,
+        ticket_id,
+    )
+    if ticket is None:
+        raise ValueError(f"No ticket with id {ticket_id}")
+    
+    events = await pool.fetch(
+        "SELECT event_type, agent_id, content, created_at FROM ticket_events WHERE ticket_id = $1 ORDER BY id",
+        ticket_id,
+    )
+
+    def iso(value):
+        return value.isoformat() if value is not None else None
+
+    ticket_data = dict(ticket)
+    for key in ("claimed_at","fixed_at","verified_at", "created_at"):
+        ticket_data[key] = iso(ticket_data[key])
+
+    return {"ticket": ticket_data,
+            "events": [{**dict(e), "created_at": iso(e["created_at"])} for e in events],
+    }
+
+
+            
+
 
 
 
