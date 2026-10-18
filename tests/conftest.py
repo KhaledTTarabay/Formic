@@ -13,7 +13,6 @@ os.environ["DATABASE_URL"] = os.environ.get(
 import asyncpg
 import pytest
 import pytest_asyncio
-from pytest_asyncio import is_async_test
 
 from formic import db, embeddings
 from formic.mcp_server import claim_ticket, file_ticket, mcp, resolve_ticket
@@ -24,13 +23,8 @@ if "test" not in TEST_DB:
     raise RuntimeError(f"Refusing to run tests against {TEST_DB!r}: the test database is dropped and recreated")
 
 
-def pytest_collection_modifyitems(items):
-    # Run every async test on one session-wide event loop, so they can share
-    # the asyncpg pool and the loaded embedding model.
-    marker = pytest.mark.asyncio(loop_scope="session")
-    for item in items:
-        if is_async_test(item):
-            item.add_marker(marker, append=False)
+# Every test and fixture shares one session-wide event loop (set in
+# pyproject.toml), so they can share the asyncpg pool and the loaded model.
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
