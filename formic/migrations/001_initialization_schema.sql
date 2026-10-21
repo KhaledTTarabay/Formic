@@ -1,5 +1,3 @@
-BEGIN;
-
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE agents (
@@ -130,5 +128,3 @@ CREATE INDEX tickets_status_idx ON tickets (status);
 CREATE INDEX tickets_claimed_by_idx ON tickets (claimed_by_agent_id);
 CREATE INDEX ticket_events_ticket_id_idx ON ticket_events (ticket_id);
 CREATE INDEX tickets_embedding_idx ON tickets USING hnsw (embedding vector_cosine_ops);
-
-COMMIT;
