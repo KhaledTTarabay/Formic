@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+tests/
 .env
 *.pyc
 requirements-dev.txt
