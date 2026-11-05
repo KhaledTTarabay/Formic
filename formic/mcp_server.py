@@ -3,6 +3,7 @@ from formic import db
 from formic import queries
 from formic import embeddings
 from typing import Literal
+from formic.formic_types import Status, Urgency, BugType
 import asyncpg
 
 mcp = FastMCP("Formic MCP", stateless_http=True, streamable_http_path="/")
@@ -27,8 +28,8 @@ async def file_ticket(
     agent_id:int, 
     title:str, 
     description:str, 
-    urgency:Literal["low","normal","high","critical"] = "normal", 
-    bug_type:Literal["bug","crash","regression","test_failure", "build_failure", "performance", "security"] = "bug",
+    urgency:Urgency = "normal", 
+    bug_type:BugType = "bug",
     repo:str | None = None,
     commit_hash:str | None = None,
     file_path:str | None = None,
