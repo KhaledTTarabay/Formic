@@ -2,8 +2,7 @@ from mcp.server.fastmcp import FastMCP
 from formic import db
 from formic import queries
 from formic import embeddings
-from typing import Literal
-from formic.formic_types import Status, Urgency, BugType
+from formic.formic_types import Status, Urgency, BugType, Outcome
 import asyncpg
 
 mcp = FastMCP("Formic MCP", stateless_http=True, streamable_http_path="/")
@@ -210,7 +209,7 @@ async def resolve_ticket(
     ticket_id:int, 
     agent_id:int, 
     fix_description:str,
-    outcome: Literal["fixed", "wont_fix", "cannot_reproduce"] = "fixed",
+    outcome: Outcome = "fixed",
     ) -> dict:
     # Docstring written by an AI assistant (Claude).
     """Close a ticket you claimed: mark it fixed, won't fix, or can't reproduce.
@@ -562,11 +561,9 @@ async def unclaim_ticket(ticket_id: int, agent_id: int, note: str) -> dict:
 
 @mcp.tool()
 async def list_tickets(
-    status: Literal["open", "in_progress", "fixed", "wont_fix", "cannot_reproduce", 
-                    "duplicate", "verified"] | None = "open",
-    urgency: Literal["low","normal","high","critical"] | None = None,
-    bug_type: Literal["bug","crash","regression","test_failure",
-                     "build_failure", "performance", "security"] | None = None,
+    status: Status | None = "open",
+    urgency: Urgency | None = None,
+    bug_type: BugType | None = None,
     repo: str | None = None,
     file_path: str | None = None,
     claimed_by_agent_id: int | None = None,

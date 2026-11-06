@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from formic import db
 from formic.mcp_server import mcp
+from formic import api
 from formic import embeddings
 
 @asynccontextmanager
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title = "Formic", lifespan=lifespan)
 app.mount("/mcp", mcp.streamable_http_app())
+app.include_router(api.router, prefix="/api")
 
 
 @app.get("/health")
